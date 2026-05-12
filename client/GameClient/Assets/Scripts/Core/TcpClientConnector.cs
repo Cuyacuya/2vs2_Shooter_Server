@@ -5,6 +5,10 @@ using UnityEngine;
 public class TcpClientConnector
 {
     private TcpClient client;
+    private NetworkStream stream;
+
+    public NetworkStream Stream => stream;
+
     public bool Connect(string ip, int port)
     {
         try
@@ -12,21 +16,26 @@ public class TcpClientConnector
             client = new TcpClient();
             client.Connect(ip, port);
 
-            Debug.Log("¼­¹ö ¿¬°á ¼º°ø");
+            stream = client.GetStream();
+
+            Debug.Log("ì„œë²„ ì—°ê²° ì„±ê³µ");
             return true;
         }
         catch (Exception e)
         {
-            Debug.LogError("¼­¹ö ¿¬°á ½ÇÆÐ: " + e.Message);
+            Debug.LogError("ì„œë²„ ì—°ê²° ì‹¤íŒ¨: " + e.Message);
             return false;
         }
     }
 
     public void Disconnect()
     {
+        stream?.Close();
         client?.Close();
+
+        stream = null;
         client = null;
 
-        Debug.Log("¼­¹ö ¿¬°á Á¾·á");
+        Debug.Log("ì„œë²„ ì—°ê²° ì¢…ë£Œ");
     }
 }

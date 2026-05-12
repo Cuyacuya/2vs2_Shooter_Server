@@ -1,31 +1,82 @@
 # Packet Protocol v0
 
-## Common
-- Endian: Little Endian
-- String: UTF-8, length-prefixed (uint16 length + bytes)
+## Common Rules
 
-## Header (6 bytes)
-| Field        | Size   | Description         |
-|--------------|--------|---------------------|
-| length       | uint16 | payload byte length |
-| packetId     | uint16 | packet type (enum)  |
-| sessionToken | uint16 | session id (UDP용)  |
+| 항목 | 결정 | 선택 근거 |
+|---|---|---|
+| Endian | Little Endian | x86/x64 CPU + C# `BinaryWriter` 기본값. 서버(C#)와 클라(Unity C#) 둘 다 자동 일치 → 변환 코드 불필요 |
+| 문자열 | UTF-8 + length-prefixed (`ushort` 길이 + bytes) | UTF-8 = 인터넷 표준, 모든 언어 호환. 길이 접두 = `\0` 종료자보다 빠르고 본문에 `\0` 들어가도 안전 |
+| 프레이밍 | length-prefixed (헤더 첫 필드가 payload 길이) | TCP는 메시지 경계가 없음 → 받는 쪽이 직접 자르려면 "내 크기" 정보가 맨 앞에 필요 |
+
+---
+
+## Header (6 bytes, 모든 패킷 공통)
+
+| Field        | Type   | Size | Description                 |
+|--------------|--------|------|-----------------------------|
+| length       | ushort | 2    | payload 바이트 길이 (헤더 제외) |
+| packetId     | ushort | 2    | 패킷 종류 (`PacketId` enum)   |
+| sessionToken | ushort | 2    | 세션 식별자 (UDP에서 발신자 매칭) |
+
+### 설계 근거
+
+| 결정 | 근거 |
+|---|---|
+| length가 첫 필드 | 받는 쪽이 payload 크기 모르는 상태에서 자르려면 **맨 앞**에 있어야 함 |
+| length는 ushort(최대 65535) | 우리 게임 패킷은 다 작음. `uint`(4바이트)는 낭비, `byte`(255)는 부족 |
+| packetId 헤더에 포함 | 어떤 패킷인지 알아야 어떤 Deserialize 호출할지 결정. payload 안에 두면 늦음 |
+| sessionToken 모든 패킷에 포함 | UDP는 비연결이라 발신자 정보 없음 → 매 패킷에 자기 신원 첨부. TCP는 사실 불필요하지만 형식 통일 (3주차에 UDP 도입 시 활용) |
+| 헤더 크기 6바이트 고정 | 가변이면 파싱 복잡. 작은 게임 패킷에선 6바이트도 충분히 작음 |
+
+---
 
 ## PacketId Enum
-| Id | Name          | Direction     |
-|----|---------------|---------------|
-| 1  | C_Login       | Client→Server |
-| 2  | S_LoginResult | Server→Client |
+
+| Id | Name             | Direction     | 주차 |
+|----|------------------|---------------|------|
+| 1  | C_Login          | Client→Server | 1주차 |
+| 2  | S_LoginResult    | Server→Client | 1주차 |
+| _3_ | _S_MatchingStatus_ | _Server→Client_ | _1주차 (예정)_ |
+| _4_ | _S_GameStart_      | _Server→Client_ | _1주차 (예정)_ |
+
+- `packetId = 0` 은 미사용/예약. 1부터 시작.
+
+---
 
 ## Packet Definitions
 
 ### C_Login (id=1)
-| Field    | Type   | Notes          |
-|----------|--------|----------------|
-| nickname | string | 2~16자, UTF-8 |
+클라 접속 직후 닉네임 전송.
+
+| Field    | Type   | Notes              |
+|----------|--------|--------------------|
+| nickname | string | UTF-8, 2~16자 권장 |
+
+**Payload 예 ("Alice"):**
+```
+[05 00]                       ← nickname 길이 = 5
+[41 6C 69 63 65]              ← "Alice" UTF-8
+총 7바이트
+```
 
 ### S_LoginResult (id=2)
-| Field        | Type   | Notes                   |
-|--------------|--------|-------------------------|
-| result       | byte   | 0=성공, 1=닉네임 중복   |
-| sessionToken | uint16 | 발급된 세션 id (성공 시)|
+C_Login 처리 후 서버가 응답.
+
+| Field        | Type   | Notes                                    |
+|--------------|--------|------------------------------------------|
+| success      | bool   | 1바이트 (1=성공, 0=실패)                  |
+| sessionToken | ushort | 발급된 세션 id (실패 시 0)                |
+| reason       | string | 실패 사유 (예: "MATCH_IN_PROGRESS"). 성공 시 "" |
+
+**설계 근거:**
+- `success`를 `bool(1)`로 (`byte` 대신): 의미 명확. 추가 코드(0=성공/1=실패) 외울 필요 없음
+- `reason`을 항상 포함 (성공이어도): 성공 시 빈 문자열(2바이트) — 일관성. payload 길이 가변 처리 단순화
+
+---
+
+## 새 패킷 추가 절차 (체크리스트)
+
+1. `shared/Shared/PacketId.cs` — enum에 새 id 추가
+2. `shared/Shared/Packets/{PacketName}.cs` — 패킷 클래스 (필드 + `Serialize` + `Deserialize`)
+3. `server/GameServer/ClientSession.cs` — `HandlePacket` switch에 `case` 추가 (서버가 받을 패킷일 때만)
+4. 이 문서에 PacketId 표 + Packet Definitions에 추가

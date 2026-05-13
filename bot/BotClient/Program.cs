@@ -5,53 +5,69 @@ using Shared;
 const string Host = "127.0.0.1";
 const int Port = 7777;
 
-// ─── Test1: C_Login 정상 1개 ──────────────────────
+static async Task<(ushort id, BinaryReader br, MemoryStream ms)?>
+ReadOnePacketAsync(NetworkStream networkStream, CancellationToken ct)
 {
-    Console.WriteLine("\n=== [Test1] C_Login 1개 ===");
-    using var client = new TcpClient();
-    await client.ConnectAsync(Host, Port);
-    var stream = client.GetStream();
+    byte[] buf = new byte[1024];
+    int writePos = 0;
 
-    var login = new C_Login { Nickname = "Alice" };
-    byte[] pkt = login.Serialize();
-    await stream.WriteAsync(pkt);
-    Console.WriteLine($"  sent {pkt.Length} bytes");
-    await Task.Delay(300);
-}
-
-// ─── Test2: 합쳐짐 (C_Login 2개) ──────────────────
-{
-    Console.WriteLine("\n=== [Test2] 합쳐짐 (2개) ===");
-    using var client = new TcpClient();
-    await client.ConnectAsync(Host, Port);
-    var stream = client.GetStream();
-
-    byte[] a = new C_Login { Nickname = "Bob" }.Serialize();
-    byte[] b = new C_Login { Nickname = "Charlie" }.Serialize();
-    byte[] merged = new byte[a.Length + b.Length];
-    Buffer.BlockCopy(a, 0, merged, 0, a.Length);
-    Buffer.BlockCopy(b, 0, merged, a.Length, b.Length);
-
-    await stream.WriteAsync(merged);
-    Console.WriteLine($"  sent {merged.Length} bytes");
-    await Task.Delay(300);
-}
-
-// ─── Test3: 쪼개짐 (1바이트씩) ────────────────────
-{
-    Console.WriteLine("\n=== [Test3] 쪼개짐 ===");
-    using var client = new TcpClient();
-    await client.ConnectAsync(Host, Port);
-    var stream = client.GetStream();
-
-    byte[] pkt = new C_Login { Nickname = "Dave" }.Serialize();
-    for (int i = 0; i < pkt.Length; i++)
+    while(true)
     {
-        await stream.WriteAsync(pkt.AsMemory(i, 1));
-        await Task.Delay(20);
+        int read = await networkStream.ReadAsync(buf.AsMemory(writePos), ct);
+        if(read == 0) return null;
+        writePos += read;
+
+        if(writePos < 6) continue;
+        ushort len = BitConverter.ToUInt16(buf, 0);
+        int total = 6 + len;
+        if(writePos < total) continue;
+
+        var ms = new MemoryStream(buf, 0, total);
+        var br = new BinaryReader(ms);
+        var(length, id, token) = PacketIO.ReadHeader(br);
+        return (id, br, ms);
     }
-    Console.WriteLine($"  sent {pkt.Length} bytes (1 byte at a time)");
-    await Task.Delay(300);
 }
+
+  // 로그인 시도 → 응답 출력
+static async Task LoginAndCheck(string nickname)
+{
+    Console.WriteLine($"\n=== Login as '{nickname}' ===");
+    using var client = new TcpClient();
+    await client.ConnectAsync(Host, Port);
+    var stream = client.GetStream();
+
+    // 송신
+    byte[] pkt = new C_Login { Nickname = nickname }.Serialize();
+    await stream.WriteAsync(pkt);
+    Console.WriteLine($"  → C_Login sent ({pkt.Length} bytes)");
+
+    // 수신 (2초 타임아웃)
+    var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+    var result = await ReadOnePacketAsync(stream, cts.Token);
+    if (result is null)
+    {
+        Console.WriteLine("  ← (no response)");
+        return;
+    }
+    var (id, br, ms) = result.Value;
+    if ((PacketId)id == PacketId.S_LoginResult)
+    {
+        var r = S_LoginResult.Deserialize(br);
+        Console.WriteLine($"  ← S_LoginResult: success={r.Success}, token={r.SessionToken}, reason='{r.Reason}'");
+    }
+    else
+    {
+        Console.WriteLine($"  ← unexpected packetId={id}");
+    }
+    ms.Dispose();
+    br.Dispose();
+}
+
+// 시나리오 실행
+await LoginAndCheck("cuya");           // 정상
+await LoginAndCheck("alice");          // 정상 (토큰 증가 확인)
+await LoginAndCheck("");               // 거부 (빈 닉네임)
+await LoginAndCheck(new string('x', 20)); // 거부 (너무 김)
 
 Console.WriteLine("\n[Bot] 종료");

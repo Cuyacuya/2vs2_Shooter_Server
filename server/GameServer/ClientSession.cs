@@ -1,4 +1,5 @@
 using System.Net.Sockets;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Shared;
 
@@ -47,7 +48,7 @@ namespace GameServer
                     }
                     _writePos += read;
 
-                    ParsePackets();
+                    await ParsePackets();
                 }
             }
             catch (Exception ex)
@@ -56,13 +57,14 @@ namespace GameServer
             }
             finally
             {
+                MatchManager.Instance.Remove(this);
                 _client.Close();
                 Console.WriteLine($"[Session {Endpoint}] disconnected");
             }
         }
 
         // 누적 버퍼에서 완성된 패킷을 가능한 만큼 잘라 디스패치.
-        private void ParsePackets()
+        private async Task ParsePackets()
         {
             int readPos = 0;
             while (true)
@@ -81,7 +83,7 @@ namespace GameServer
 
                 if (_writePos - readPos < totalSize) break;
 
-                HandlePacket(_buffer, readPos, totalSize);
+                await HandlePacket(_buffer, readPos, totalSize);
                 readPos += totalSize;
             }
 
@@ -138,6 +140,22 @@ namespace GameServer
             //세션 상태 업데이트
             SessionToken = newToken;
             Nickname = pkt.Nickname;
+
+            //매칭 큐 등록 시도
+            bool joined = MatchManager.Instance.TryEnqueue(this);
+            if (!joined)
+            {
+                var fail = new S_LoginResult
+                {
+                    Success = false,
+                    SessionToken = 0,
+                    Reason = "MATCH_IN_PROGRESS",
+                };
+                await SendAsync(fail.Serialize());
+                Console.WriteLine($"[Session {Endpoint}] login rejected : match in progress");
+
+                return;
+            }
 
             //성공 응답
             var ok = new S_LoginResult

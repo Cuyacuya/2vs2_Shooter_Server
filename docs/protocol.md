@@ -32,14 +32,14 @@
 
 ## PacketId Enum
 
-| Id | Name             | Direction     | 주차 |
-|----|------------------|---------------|------|
-| 1  | C_Login          | Client→Server | 1주차 |
-| 2  | S_LoginResult    | Server→Client | 1주차 |
-| _3_ | _S_MatchingStatus_ | _Server→Client_ | _1주차 (예정)_ |
-| _4_ | _S_GameStart_      | _Server→Client_ | _1주차 (예정)_ |
+  | Id | Name             | Direction     | 주차 |
+  |----|------------------|---------------|------|
+  | 1  | C_Login          | Client→Server | 1주차 |
+  | 2  | S_LoginResult    | Server→Client | 1주차 |
+  | 3  | S_MatchingStatus | Server→Client | 1주차 |
+  | 4  | S_GameStart      | Server→Client | 1주차 |
 
-- `packetId = 0` 은 미사용/예약. 1부터 시작.
+  - `packetId = 0` 은 미사용/예약. 1부터 시작.
 
 ---
 
@@ -58,6 +58,32 @@
 [41 6C 69 63 65]              ← "Alice" UTF-8
 총 7바이트
 ```
+
+### S_MatchingStatus (id=3)
+  큐 대기자 수가 바뀔 때 대기 중인 모두에게 브로드캐스트.
+
+  | Field        | Type | Notes              |
+  |--------------|------|--------------------|
+  | currentCount | byte | 현재 대기자 수      |
+  | maxCount     | byte | 매치 정원 (=4)      |
+
+  **설계 근거**: 4명까지라 byte 충분. ushort 낭비.
+
+  ### S_GameStart (id=4)
+  4명 매칭 완료 시 각 클라에게 송신. 자기 팀 + 전체 플레이어 정보.
+
+  | Field        | Type   | Notes                                   |
+  |--------------|--------|-----------------------------------------|
+  | myTeam       | byte   | 받는 사람의 팀 (0=Red, 1=Blue)            |
+  | playerCount  | byte   | 참가자 수 (=4)                            |
+  | players[]    | 반복   | playerCount 만큼 반복. 각 항목:           |
+  | └ token      | ushort | 그 플레이어의 세션 토큰                    |
+  | └ team       | byte   | 그 플레이어의 팀 (0=Red, 1=Blue)          |
+  | └ nickname   | string | 그 플레이어의 닉네임                      |
+
+  **설계 근거**:
+  - `myTeam` 따로 둠: 모든 정보가 players[]에 있긴 하지만 자기 팀 빠르게 확인용
+  - 팀 배정 규칙: 등록 순서 1,3 → Red(0) / 2,4 → Blue(1)
 
 ### S_LoginResult (id=2)
 C_Login 처리 후 서버가 응답.

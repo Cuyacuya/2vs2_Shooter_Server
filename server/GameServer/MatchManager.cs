@@ -18,19 +18,20 @@ namespace GameServer
         //외부에서 new 못 하게 막음 (싱글톤 강제)
         private MatchManager() { }
 
-        //큐에 등록 시도.
-        //매치 진행 중이면 false, 아니면 true
-        public bool TryEnqueue(ClientSession session)
+        //큐에 등록 시도. 매치 진행 중이면 false, 아니면 true.
+        //브로드캐스트는 안 함. 호출자가 응답을 먼저 보낸 뒤 snapshot으로 BroadcastStatusNow/BroadcastGameStartNow 호출.
+        public bool TryEnqueue(ClientSession session,
+                               out List<ClientSession>? statusSnapshot,
+                               out List<ClientSession>? gameStartSnapshot)
         {
-            List<ClientSession>? statusSnapshot = null; //현재 상태를 snapshot
-            List<ClientSession>? gameStartSnapshot = null; //게임 시작 시 snapshot
+            statusSnapshot = null;
+            gameStartSnapshot = null;
 
             lock (_lock)
             {
                 if (_matchInProgress)
                 {
                     Console.WriteLine($"[Match] reject {session.Nickname}: match in progress");
-
                     return false;
                 }
 
@@ -46,16 +47,13 @@ namespace GameServer
                 {
                     statusSnapshot = new List<ClientSession>(_waiting);
                 }
+                return true;
             }
-
-            if (statusSnapshot != null)
-                BroadcastStatus(statusSnapshot);
-
-            if (gameStartSnapshot != null)
-                BroadcastGameStart(gameStartSnapshot);
-
-            return true;
         }
+
+        // 호출자(HandleLogin)가 S_LoginResult 응답 후에 호출.
+        public void BroadcastStatusNow(List<ClientSession> snapshot) => BroadcastStatus(snapshot);
+        public void BroadcastGameStartNow(List<ClientSession> snapshot) => BroadcastGameStart(snapshot);
 
         //대기 중 세션이 끊기면 큐에서 제거(매치 시작 후엔 무시)
         public void Remove(ClientSession session)

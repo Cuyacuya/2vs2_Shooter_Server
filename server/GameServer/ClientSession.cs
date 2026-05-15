@@ -137,13 +137,13 @@ namespace GameServer
 
             //토큰 발급(스레드 안전)
             ushort newToken = (ushort)Interlocked.Increment(ref _nextToken);
-            
+
             //세션 상태 업데이트
             SessionToken = newToken;
             Nickname = pkt.Nickname;
 
-            //매칭 큐 등록 시도
-            bool joined = MatchManager.Instance.TryEnqueue(this);
+            //매칭 큐 등록 시도 (브로드캐스트는 아직 X — snapshot만 받음)
+            bool joined = MatchManager.Instance.TryEnqueue(this, out var statusSnap, out var gameStartSnap);
             if (!joined)
             {
                 var fail = new S_LoginResult
@@ -154,11 +154,10 @@ namespace GameServer
                 };
                 await SendAsync(fail.Serialize());
                 Console.WriteLine($"[Session {Endpoint}] login rejected : match in progress");
-
                 return;
             }
 
-            //성공 응답
+            //성공 응답 — S_LoginResult를 먼저 보낸 뒤에야 매칭 상태/게임 시작 패킷 송신
             var ok = new S_LoginResult
             {
                 Success = true,
@@ -167,6 +166,12 @@ namespace GameServer
             };
             await SendAsync(ok.Serialize());
             Console.WriteLine($"[Session {Endpoint}] login ok : nickname={Nickname}, token={newToken}");
+
+            //응답 이후 브로드캐스트 (순서 보장: S_LoginResult → S_MatchingStatus 또는 S_GameStart)
+            if (statusSnap != null)
+                MatchManager.Instance.BroadcastStatusNow(statusSnap);
+            if (gameStartSnap != null)
+                MatchManager.Instance.BroadcastGameStartNow(gameStartSnap);
         }
 
         // 외부에서 이 세션으로 패킷 보낼 때 호출.

@@ -24,6 +24,7 @@ namespace GameServer
         public string Endpoint { get; }
         public ushort SessionToken { get; set; } = 0;
         public string Nickname { get; set; } = "";
+        public byte Team { get; set; } = 0;  // 0=Red, 1=Blue. StartMatch에서 세팅
 
         public ClientSession(TcpClient client)
         {

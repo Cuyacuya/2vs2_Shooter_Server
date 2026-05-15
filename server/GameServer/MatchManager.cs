@@ -22,7 +22,8 @@ namespace GameServer
         //매치 진행 중이면 false, 아니면 true
         public bool TryEnqueue(ClientSession session)
         {
-            List<ClientSession>? snapshot = null;
+            List<ClientSession>? statusSnapshot = null; //현재 상태를 snapshot
+            List<ClientSession>? gameStartSnapshot = null; //게임 시작 시 snapshot
 
             lock (_lock)
             {
@@ -36,18 +37,22 @@ namespace GameServer
                 _waiting.Add(session);
                 Console.WriteLine($"[Match] {session.Nickname} joined queue({_waiting.Count}/{MaxPlayers})");
 
-                if(_waiting.Count >= MaxPlayers)
+                if (_waiting.Count >= MaxPlayers)
                 {
                     StartMatch();
+                    gameStartSnapshot = new List<ClientSession>(_waiting);
                 }
                 else
                 {
-                    snapshot = new List<ClientSession>(_waiting);
+                    statusSnapshot = new List<ClientSession>(_waiting);
                 }
             }
 
-            if(snapshot != null)
-                BroadcastStatus(snapshot);
+            if (statusSnapshot != null)
+                BroadcastStatus(statusSnapshot);
+
+            if (gameStartSnapshot != null)
+                BroadcastGameStart(gameStartSnapshot);
 
             return true;
         }
@@ -62,12 +67,12 @@ namespace GameServer
                 if (_waiting.Remove(session))
                 {
                     Console.WriteLine($"[Match] {session.Nickname} left queue({_waiting.Count}/{MaxPlayers})");
-                    if(!_matchInProgress)
+                    if (!_matchInProgress)
                         snapshot = new List<ClientSession>(_waiting);
                 }
             }
 
-            if(snapshot != null)
+            if (snapshot != null)
                 BroadcastStatus(snapshot);
         }
 
@@ -91,12 +96,44 @@ namespace GameServer
         private void StartMatch()
         {
             _matchInProgress = true;
-            Console.WriteLine($"[Match] === MATCH STARTING ({_waiting.Count} players) ===");
-            foreach(var s in _waiting)
+
+            // 팀 배정: 등록 순서 1,3 → Red(0) / 2,4 → Blue(1)
+            // 인덱스 기준: 0,2 → Red / 1,3 → Blue → i % 2
+            for (int i = 0; i < _waiting.Count; i++)
             {
-                Console.WriteLine($"  - {s.Nickname} (token={s.SessionToken})");
+                _waiting[i].Team = (byte)(i % 2);
             }
-            // TODO(금): 팀 배정 + S_GameStart 송신
+
+            Console.WriteLine($"[Match] === MATCH STARTING ({_waiting.Count} players) ===");
+            foreach (var s in _waiting)
+            {
+                string teamName = s.Team == 0 ? "Red" : "Blue";
+                Console.WriteLine($"  - {s.Nickname} (token={s.SessionToken}, team={teamName})");
+            }
+        }
+
+        private void BroadcastGameStart(List<ClientSession> sessions)
+        {
+            var playerInfos = new List<S_GameStart.PlayerInfo>(sessions.Count);
+            foreach (var s in sessions)
+            {
+                playerInfos.Add(new S_GameStart.PlayerInfo
+                {
+                    Token = s.SessionToken,
+                    Team = s.Team,
+                    Nickname = s.Nickname,
+                });
+            }
+
+            foreach (var receiver in sessions)
+            {
+                var pkt = new S_GameStart
+                {
+                    MyTeam = receiver.Team,
+                    Players = playerInfos,
+                };
+                _ = receiver.SendAsync(pkt.Serialize());
+            }
         }
     }
 }

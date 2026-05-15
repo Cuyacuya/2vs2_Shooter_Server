@@ -1,3 +1,5 @@
+using Shared;
+
 namespace GameServer
 {
     //자동 매칭 큐(싱글톤, FIFO, 단일 매치)
@@ -20,6 +22,8 @@ namespace GameServer
         //매치 진행 중이면 false, 아니면 true
         public bool TryEnqueue(ClientSession session)
         {
+            List<ClientSession>? snapshot = null;
+
             lock (_lock)
             {
                 if (_matchInProgress)
@@ -36,19 +40,50 @@ namespace GameServer
                 {
                     StartMatch();
                 }
-                return true;
+                else
+                {
+                    snapshot = new List<ClientSession>(_waiting);
+                }
             }
+
+            if(snapshot != null)
+                BroadcastStatus(snapshot);
+
+            return true;
         }
 
         //대기 중 세션이 끊기면 큐에서 제거(매치 시작 후엔 무시)
         public void Remove(ClientSession session)
         {
+            List<ClientSession>? snapshot = null;
+
             lock (_lock)
             {
                 if (_waiting.Remove(session))
                 {
                     Console.WriteLine($"[Match] {session.Nickname} left queue({_waiting.Count}/{MaxPlayers})");
+                    if(!_matchInProgress)
+                        snapshot = new List<ClientSession>(_waiting);
                 }
+            }
+
+            if(snapshot != null)
+                BroadcastStatus(snapshot);
+        }
+
+        // 대기 중 모두에게 현재 인원 알림. lock 밖에서만 호출.
+        private void BroadcastStatus(List<ClientSession> sessions)
+        {
+            var pkt = new S_MatchingStatus
+            {
+                CurrentCount = (byte)sessions.Count,
+                MaxCount = (byte)MaxPlayers,
+            };
+            byte[] bytes = pkt.Serialize();
+
+            foreach (var s in sessions)
+            {
+                _ = s.SendAsync(bytes);
             }
         }
 

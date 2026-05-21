@@ -78,6 +78,13 @@
   - 1주차: 수동 복사
   - 2주차 이후: 자동화 검토 (DLL 빌드 또는 Symlink)
 
+### 게임 밸런스 설정 (`config/balance.json`)
+- 코드와 데이터 분리 원칙. 이동속도/HP/데미지/중력 등 **디자이너 튜닝 대상 값은 모두 JSON**, 코드에는 비트마스크·수학 상수만.
+- 서버는 시작 시 로드, 클라(Unity)는 StreamingAssets에서 동일 파일 로드 → **단일 진실(single source of truth)** 확보, 클라/서버 값 어긋남 방지
+- POCO 매핑: `shared/Shared/BalanceConfig.cs` — Shared.dll 안에 포함되므로 양쪽에서 동일 클래스로 deserialize
+- 핫 리로드는 학기 범위 밖 (재시작으로 충분). LiveOps/원격 설정은 방학 보강 또는 C++ 리메이크
+- 참고: CS:GO `weapons.txt`, 모바일 게임 시트 자동화와 같은 컨벤션의 단순 버전
+
 ### 비주얼 정책 (학기 동안)
 
 프로토타입 우선 원칙. 5주 안에 시스템 검증이 목표이므로 비주얼은 최소화.

@@ -106,7 +106,8 @@
 | 월 | [공동] 인게임 패킷 정의 (C_Input, S_Snapshot, C_Fire, S_HitResult) → protocol.md | 🟡 | 1h |
 | 월 | [Shared] 인게임 패킷 클래스 + 직렬화 (이동/점프/시점/사격) | 🟡 | 1.5h |
 | 화 | [서버] **PlayerState 클래스** (위치, 회전yaw/pitch, HP, 팀, 사망, isGrounded, velocity.y) | 🟡 | 1.5h |
-| 화 | [서버] **C_Input 받아 위치 갱신** (받자마자 처리, WASD만 먼저) | 🔴 | 1.5h |
+| 화 | [공동] **balance.json + Shared/BalanceConfig 도입** (서버·클라 공유 설정, 밸런스 분리) | 🟡 | 0.5h |
+| 화 | [서버] **C_Input 받아 위치 갱신** (받자마자 처리, WASD만 먼저, BalanceConfig 사용) | 🔴 | 1.5h |
 | 수 | [서버] **점프 + 중력 시뮬레이션** (velocity.y -= 9.8*dt, 지면 충돌, isGrounded) | 🔴 | 2h |
 | 수 | [서버] 마우스 룩 (yaw/pitch) 처리 + 시점 회전 동기화 | 🟡 | 1h |
 | 목 | [서버] C_Fire 받으면 ray 생성 (위치 + forward 방향) | 🔴 | 1h |
@@ -118,7 +119,7 @@
 | 금 | **TCP 위치 동기화 한계 관찰** (부드럽지 않음, 점프 끊김 등 메모) | 🔴 | 0.5h |
 | 토 | (버퍼) 동시성 lock 점검 (PlayerState 동시 접근) | - | 2h |
 
-**2주차 시간**: 약 17h
+**2주차 시간**: 약 17.5h
 
 ### 2주차 핵심 학습
 - **다중 세션 동시성** (`lock`, `ConcurrentDictionary`) — `ch06_멀티스레드_윈도우.pdf`, `ch07_멀티스레드_리눅스.pdf` 연계

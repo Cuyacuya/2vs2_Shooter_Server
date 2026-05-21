@@ -1,0 +1,17 @@
+{
+  "player": {
+    "moveSpeed": 5.0,
+    "initialHp": 100,
+    "jumpVelocity": 5.0,
+    "pitchMinDeg": -85.0,
+    "pitchMaxDeg": 85.0
+  },
+  "physics": {
+    "gravity": -9.8,
+    "groundY": 0.0
+  },
+  "weapon": {
+    "damage": 25,
+    "hitscanSphereRadius": 0.5
+  }
+}

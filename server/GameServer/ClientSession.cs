@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Shared;
+using System.Diagnostics; //Stopwatch
 
 namespace GameServer
 {
@@ -25,6 +26,7 @@ namespace GameServer
         public ushort SessionToken { get; set; } = 0;
         public string Nickname { get; set; } = "";
         public byte Team { get; set; } = 0;  // 0=Red, 1=Blue. StartMatch에서 세팅
+        public PlayerState Player { get; } = new();
 
         public ClientSession(TcpClient client)
         {
@@ -108,11 +110,17 @@ namespace GameServer
             switch ((PacketId)id)
             {
                 case PacketId.C_Login:
-                {
-                    var pkt = C_Login.Deserialize(br);
-                    await HandleLogin(pkt);
-                    break;
-                }
+                    {
+                        var pkt = C_Login.Deserialize(br);
+                        await HandleLogin(pkt);
+                        break;
+                    }
+                case PacketId.C_Input:
+                    {
+                        var pkt = C_Input.Deserialize(br);
+                        HandleInput(pkt);
+                        break;
+                    }
                 default:
                     Console.WriteLine($"[Session {Endpoint}] unknown packetId={id}");
                     break;
@@ -122,7 +130,7 @@ namespace GameServer
         private async Task HandleLogin(C_Login pkt)
         {
             //닉네임 검증(빈 문자열 or 너무 긴 닉네임)
-            if(string.IsNullOrWhiteSpace(pkt.Nickname) || pkt.Nickname.Length > 16)
+            if (string.IsNullOrWhiteSpace(pkt.Nickname) || pkt.Nickname.Length > 16)
             {
                 var fail = new S_LoginResult
                 {
@@ -172,6 +180,68 @@ namespace GameServer
                 MatchManager.Instance.BroadcastStatusNow(statusSnap);
             if (gameStartSnap != null)
                 MatchManager.Instance.BroadcastGameStartNow(gameStartSnap);
+        }
+
+        private void HandleInput(C_Input pkt)
+        {
+            // 밸런스값(이동속도, pitch 범위) = balance.json에서 로드. 디자이너 튜닝 대상.
+            // 수학 상수(DEG2RAD) = 코드 const. 절대 안 바뀜.
+            float speed       = Balance.Current.Player.MoveSpeed;
+            float pitchMin    = Balance.Current.Player.PitchMinDeg;
+            float pitchMax    = Balance.Current.Player.PitchMaxDeg;
+            const float DEG2RAD = MathF.PI / 180f;
+
+            lock (Player.Lock)
+            {
+                if (Player.IsDead) return;
+
+                //dt 계산
+                long nowTicks = Stopwatch.GetTimestamp();
+                float dt;
+                if (Player.LastInputTicks == 0)
+                {
+                    dt = 0f;
+                }
+                else
+                {
+                    dt = (float)((nowTicks - Player.LastInputTicks) / (double)Stopwatch.Frequency);
+                    if (dt > 0.1f) dt = 0.1f; // 비정상적 큰 dt 방어 (네트워크끊김 등)
+                }
+                Player.LastInputTicks = nowTicks;
+
+                // 비트마스크 풀기 (WASD만, 점프는 수요일 작업)
+                bool w = (pkt.InputBits & (1 << 0)) != 0;
+                bool s = (pkt.InputBits & (1 << 1)) != 0;
+                bool a = (pkt.InputBits & (1 << 2)) != 0;
+                bool d = (pkt.InputBits & (1 << 3)) != 0;
+
+                // raw 이동 벡터 (캐릭터 로컬 좌표)
+                float moveX = (d ? 1f : 0f) + (a ? -1f : 0f);
+                float moveZ = (w ? 1f : 0f) + (s ? -1f : 0f);
+
+                // 대각선 정규화 (W+D 동시에 √2 빨라지지 않도록)
+                float len = MathF.Sqrt(moveX * moveX + moveZ * moveZ);
+                if (len > 0f)
+                {
+                    moveX /= len;
+                    moveZ /= len;
+                }
+
+                // 시점 갱신 (pitch 서버측 클램프 검증)
+                Player.Yaw = pkt.Yaw;
+                Player.Pitch = Math.Clamp(pkt.Pitch, pitchMin, pitchMax);
+
+                // yaw 회전 적용 → 월드 좌표 이동량
+                float yawRad = Player.Yaw * DEG2RAD;
+                float cosY = MathF.Cos(yawRad);
+                float sinY = MathF.Sin(yawRad);
+                float worldX = moveX * cosY + moveZ * sinY;
+                float worldZ = -moveX * sinY + moveZ * cosY;
+
+                // 위치 갱신 (Y축 = 점프/중력은 수요일)
+                Player.PosX += worldX * speed * dt;
+                Player.PosZ += worldZ * speed * dt;
+            }
         }
 
         // 외부에서 이 세션으로 패킷 보낼 때 호출.

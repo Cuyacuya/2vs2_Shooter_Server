@@ -2,8 +2,29 @@
 using System.Net;
 using System.Net.Sockets;
 using GameServer;
+using Shared;
 
 const int Port = 7777;
+
+// 게임 밸런스 설정 로드 (서버·클라 공유).
+// 실행 위치(bin/Debug/net8.0/)에서 위로 올라가며 Game.sln이 있는 폴더(=레포 루트) 탐색.
+// "../../../../../" 같이 단계 수를 박는 방식은 빌드 출력 경로 바뀌면 깨지므로 안전한 패턴 채택.
+string FindRepoRoot()
+{
+    var dir = new DirectoryInfo(AppContext.BaseDirectory);
+    while (dir != null)
+    {
+        if (File.Exists(Path.Combine(dir.FullName, "Game.sln")))
+            return dir.FullName;
+        dir = dir.Parent;
+    }
+    throw new DirectoryNotFoundException("repo root (containing Game.sln) not found");
+}
+string configPath = Path.Combine(FindRepoRoot(), "config", "balance.json");
+Console.WriteLine($"[Balance] loading from {configPath}");
+BalanceLoader.LoadFromFile(configPath);
+Console.WriteLine($"[Balance] loaded: MoveSpeed={Balance.Current.Player.MoveSpeed}, " +
+                  $"Damage={Balance.Current.Weapon.Damage}, Gravity={Balance.Current.Physics.Gravity}");
 
 var listener = new TcpListener(IPAddress.Any, Port);
 listener.Start();

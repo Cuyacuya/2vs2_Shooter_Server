@@ -1,4 +1,4 @@
-# DAY4 — 로그인 처리 + MatchManager (목요일)
+# Week1 Note 4 — 로그인 처리 + MatchManager (목요일)
 
 > 작성일: 2026-05-13 (목)
 > 학습 등급: 🔴 (직접/학습 핵심)

@@ -186,9 +186,9 @@ namespace GameServer
         {
             // 밸런스값(이동속도, pitch 범위) = balance.json에서 로드. 디자이너 튜닝 대상.
             // 수학 상수(DEG2RAD) = 코드 const. 절대 안 바뀜.
-            float speed       = Balance.Current.Player.MoveSpeed;
-            float pitchMin    = Balance.Current.Player.PitchMinDeg;
-            float pitchMax    = Balance.Current.Player.PitchMaxDeg;
+            float speed = Balance.Current.Player.MoveSpeed;
+            float pitchMin = Balance.Current.Player.PitchMinDeg;
+            float pitchMax = Balance.Current.Player.PitchMaxDeg;
             const float DEG2RAD = MathF.PI / 180f;
 
             lock (Player.Lock)
@@ -241,6 +241,29 @@ namespace GameServer
                 // 위치 갱신 (Y축 = 점프/중력은 수요일)
                 Player.PosX += worldX * speed * dt;
                 Player.PosZ += worldZ * speed * dt;
+
+                // 점프 비트(bit4)
+                bool jump = (pkt.InputBits & (1 << 4)) != 0;
+
+                // 점프 입력: 지면에 있을 때만 한 번 위로 가속
+                if (jump && Player.IsGrounded)
+                {
+                    Player.VelocityY = Balance.Current.Player.JumpVelocity;
+                    Player.IsGrounded = false;
+                }
+
+                // 중력 적분 → Y 위치 적분
+                Player.VelocityY += Balance.Current.Physics.Gravity * dt;
+                Player.PosY += Player.VelocityY * dt;
+
+                // 지면 클램프
+                float groundY = Balance.Current.Physics.GroundY;
+                if (Player.PosY <= groundY)
+                {
+                    Player.PosY = groundY;
+                    Player.VelocityY = 0f;
+                    Player.IsGrounded = true;
+                }
             }
         }
 

@@ -58,7 +58,10 @@ static async Task<TcpClient?> LoginAsync(string nickname)
 
 // 로그인 이후 들어오는 매칭/게임 시작 패킷을 계속 수신해 콘솔에 찍는다.
 // CancellationToken으로 종료. 연결 끊김(read==0)이나 예외도 종료 사유.
-static async Task ListenLoopAsync(TcpClient client, string nickname, CancellationToken ct)
+// gameStarted: S_GameStart 수신 시 TrySetResult(true)로 InputLoopAsync에 신호.
+static async Task ListenLoopAsync(TcpClient client, string nickname,
+                                  TaskCompletionSource<byte> gameStarted,
+                                  CancellationToken ct)
 {
     var stream = client.GetStream();
     var buf = new byte[4096];
@@ -101,6 +104,21 @@ static async Task ListenLoopAsync(TcpClient client, string nickname, Cancellatio
                             string t = p.Team == 0 ? "Red" : "Blue";
                             Console.WriteLine($"      - token={p.Token}, team={t}, nick={p.Nickname}");
                         }
+                        gameStarted.TrySetResult(pkt.MyTeam);    // 입력 루프 깨움 + 팀 전달
+                        break;
+                    }
+                    case PacketId.S_Snapshot:
+                    {
+                        var pkt = S_Snapshot.Deserialize(br);
+                        // 로그 폭주 방지: 봇 1번만 가끔 찍기
+                        if (nickname == "p1" && Random.Shared.Next(20) == 0)
+                            Console.WriteLine($"  [{nickname}] <- S_Snapshot {pkt.Players.Count}명");
+                        break;
+                    }
+                    case PacketId.S_HitResult:
+                    {
+                        var pkt = S_HitResult.Deserialize(br);
+                        Console.WriteLine($"  [{nickname}] <- S_HitResult atk={pkt.AttackerToken} vic={pkt.VictimToken} dmg={pkt.Damage} hp={pkt.VictimHpAfter} kill={pkt.IsKill}");
                         break;
                     }
                     default:
@@ -124,11 +142,65 @@ static async Task ListenLoopAsync(TcpClient client, string nickname, Cancellatio
     }
 }
 
+// 게임 시작 후 20Hz로 랜덤 입력/사격 송신. 통합 테스트용.
+static async Task InputLoopAsync(TcpClient client, string nickname,
+                                 TaskCompletionSource<byte> gameStarted,
+                                 CancellationToken ct)
+{
+    try
+    {
+        // S_GameStart 도착까지 대기. ct 취소되면 즉시 탈출.
+        var waitTask = gameStarted.Task;
+        var cancelTcs = new TaskCompletionSource();
+        using (ct.Register(() => cancelTcs.TrySetResult()))
+        {
+            await Task.WhenAny(waitTask, cancelTcs.Task);
+        }
+        if (ct.IsCancellationRequested || !waitTask.IsCompleted) return;
+
+        byte myTeam = await waitTask;
+        var stream = client.GetStream();
+        var rng = new Random(nickname.GetHashCode());
+
+        // 적팀 향한 yaw로 시작 (Red=90→+X, Blue=270→-X). 서버 스폰과 일치.
+        float yaw = myTeam == 0 ? 90f : 270f;
+
+        while (!ct.IsCancellationRequested)
+        {
+            byte bits = 0;
+            if (rng.NextDouble() < 0.2) bits |= 1 << 0;           // W 20% (느린 전진 → 교전 윈도우 길게)
+            if (rng.NextDouble() < 0.02) bits |= 1 << 4;          // Jump 2%
+
+            yaw += (float)((rng.NextDouble() - 0.5) * 4.0);       // ±2°/tick 작은 흔들림 (조준 유지)
+            if (yaw < 0)   yaw += 360;
+            if (yaw > 360) yaw -= 360;
+
+            byte[] inputBytes = new C_Input { InputBits = bits, Yaw = yaw, Pitch = 0f }.Serialize();
+            await stream.WriteAsync(inputBytes, ct);
+
+            if (rng.NextDouble() < 0.25)                          // Fire 25%
+            {
+                byte[] fireBytes = new C_Fire().Serialize();
+                await stream.WriteAsync(fireBytes, ct);
+            }
+
+            await Task.Delay(50, ct);                             // 20Hz
+        }
+    }
+    catch (OperationCanceledException) { }
+    catch (ObjectDisposedException) { }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"  [{nickname}] input error: {ex.Message}");
+    }
+}
+
 // 시나리오: 4명 차곡차곡 로그인 → 큐 채워 매치 시작
 Console.WriteLine("=== Step 1: 1~4번 로그인 (큐 채우기) ===");
 var clients = new List<(TcpClient client, string nick)>();
 var listenCts = new CancellationTokenSource();
 var listeners = new List<Task>();
+var inputers = new List<Task>();
 for (int i = 1; i <= 4; i++)
 {
     string nick = $"p{i}";
@@ -136,7 +208,9 @@ for (int i = 1; i <= 4; i++)
     if (c != null)
     {
         clients.Add((c, nick));
-        listeners.Add(ListenLoopAsync(c, nick, listenCts.Token));
+        var tcs = new TaskCompletionSource<byte>(TaskCreationOptions.RunContinuationsAsynchronously);
+        listeners.Add(ListenLoopAsync(c, nick, tcs, listenCts.Token));
+        inputers.Add (InputLoopAsync (c, nick, tcs, listenCts.Token));
     }
     await Task.Delay(100); // 로그 순서 보기 좋게
 }
@@ -147,9 +221,12 @@ Console.WriteLine("\n=== Step 2: 5번째 (MATCH_IN_PROGRESS 거부 예상) ===")
 var c5 = await LoginAsync("p5");
 c5?.Dispose();
 
-// 매칭/게임 시작 패킷 수신 시간 확보
-await Task.Delay(500);
+// 매칭/게임 시작 후 10초간 인게임 시뮬 (입력/사격 송신 + S_Snapshot/S_HitResult 수신)
+Console.WriteLine("\n=== Step 3: 인게임 시뮬 5초 ===");
+await Task.Delay(5000);
+
 Console.WriteLine("\n[Bot] 정리 (모든 연결 종료)");
 listenCts.Cancel();
 foreach (var (c, _) in clients) c.Dispose();
 try { await Task.WhenAll(listeners); } catch { }
+try { await Task.WhenAll(inputers);  } catch { }

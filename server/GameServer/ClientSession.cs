@@ -331,7 +331,11 @@ namespace GameServer
                 if (t < bestT) { bestT = t; hitSession = enemy; }
             }
 
-            if (hitSession == null) return; // miss
+            if (hitSession == null)
+            {
+                Console.WriteLine($"[Fire] {Nickname} -> miss");
+                return;
+            }
 
             // 4) HP 감소 + 사망 판정
             byte hpAfter; byte isKill;

@@ -95,11 +95,25 @@ namespace GameServer
         {
             _matchInProgress = true;
 
-            // 팀 배정: 등록 순서 1,3 → Red(0) / 2,4 → Blue(1)
-            // 인덱스 기준: 0,2 → Red / 1,3 → Blue → i % 2
+            // 팀 배정 + 스폰 위치 부여
+            // Red(team=0): -X쪽 / Blue(team=1): +X쪽. 팀원 둘은 Z 오프셋으로 분리.
+            // 두 팀 마주봄 → 직진 이동만 해도 적과 교전 가능
             for (int i = 0; i < _waiting.Count; i++)
             {
-                _waiting[i].Team = (byte)(i % 2);
+                var s = _waiting[i];
+                s.Team = (byte)(i % 2);
+
+                int teamSlot = i / 2;                          // 0 또는 1 (팀 내 순번)
+                s.Player.SessionToken = s.SessionToken;
+                s.Player.Team         = s.Team;
+                s.Player.PosX = s.Team == 0 ? -8f : 8f;        // Red 왼쪽 / Blue 오른쪽
+                s.Player.PosY = 0f;
+                s.Player.PosZ = teamSlot == 0 ? -2f : 2f;
+                s.Player.Yaw  = s.Team == 0 ? 90f : 270f;      // 서로 바라봄
+                s.Player.Hp   = Balance.Current.Player.InitialHp;
+                s.Player.IsDead = false;
+                s.Player.IsGrounded = true;
+                s.Player.VelocityY = 0f;
             }
 
             Console.WriteLine($"[Match] === MATCH STARTING ({_waiting.Count} players) ===");

@@ -2,6 +2,7 @@ using System.Net.Sockets;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Shared;
+using System.Diagnostics; //Stopwatch
 
 namespace GameServer
 {
@@ -25,6 +26,7 @@ namespace GameServer
         public ushort SessionToken { get; set; } = 0;
         public string Nickname { get; set; } = "";
         public byte Team { get; set; } = 0;  // 0=Red, 1=Blue. StartMatch에서 세팅
+        public PlayerState Player { get; } = new();
 
         public ClientSession(TcpClient client)
         {
@@ -108,11 +110,23 @@ namespace GameServer
             switch ((PacketId)id)
             {
                 case PacketId.C_Login:
-                {
-                    var pkt = C_Login.Deserialize(br);
-                    await HandleLogin(pkt);
-                    break;
-                }
+                    {
+                        var pkt = C_Login.Deserialize(br);
+                        await HandleLogin(pkt);
+                        break;
+                    }
+                case PacketId.C_Input:
+                    {
+                        var pkt = C_Input.Deserialize(br);
+                        HandleInput(pkt);
+                        break;
+                    }
+                case PacketId.C_Fire:
+                    {
+                        var pkt = C_Fire.Deserialize(br);
+                        HandleFire(pkt);
+                        break;
+                    }
                 default:
                     Console.WriteLine($"[Session {Endpoint}] unknown packetId={id}");
                     break;
@@ -122,7 +136,7 @@ namespace GameServer
         private async Task HandleLogin(C_Login pkt)
         {
             //닉네임 검증(빈 문자열 or 너무 긴 닉네임)
-            if(string.IsNullOrWhiteSpace(pkt.Nickname) || pkt.Nickname.Length > 16)
+            if (string.IsNullOrWhiteSpace(pkt.Nickname) || pkt.Nickname.Length > 16)
             {
                 var fail = new S_LoginResult
                 {
@@ -172,6 +186,225 @@ namespace GameServer
                 MatchManager.Instance.BroadcastStatusNow(statusSnap);
             if (gameStartSnap != null)
                 MatchManager.Instance.BroadcastGameStartNow(gameStartSnap);
+        }
+
+        private void HandleInput(C_Input pkt)
+        {
+            // 밸런스값(이동속도, pitch 범위) = balance.json에서 로드. 디자이너 튜닝 대상.
+            // 수학 상수(DEG2RAD) = 코드 const. 절대 안 바뀜.
+            float speed = Balance.Current.Player.MoveSpeed;
+            float pitchMin = Balance.Current.Player.PitchMinDeg;
+            float pitchMax = Balance.Current.Player.PitchMaxDeg;
+            const float DEG2RAD = MathF.PI / 180f;
+
+            lock (Player.Lock)
+            {
+                if (Player.IsDead) return;
+
+                //dt 계산
+                long nowTicks = Stopwatch.GetTimestamp();
+                float dt;
+                if (Player.LastInputTicks == 0)
+                {
+                    dt = 0f;
+                }
+                else
+                {
+                    dt = (float)((nowTicks - Player.LastInputTicks) / (double)Stopwatch.Frequency);
+                    if (dt > 0.1f) dt = 0.1f; // 비정상적 큰 dt 방어 (네트워크끊김 등)
+                }
+                Player.LastInputTicks = nowTicks;
+
+                // 비트마스크 풀기 (WASD만, 점프는 수요일 작업)
+                bool w = (pkt.InputBits & (1 << 0)) != 0;
+                bool s = (pkt.InputBits & (1 << 1)) != 0;
+                bool a = (pkt.InputBits & (1 << 2)) != 0;
+                bool d = (pkt.InputBits & (1 << 3)) != 0;
+
+                // raw 이동 벡터 (캐릭터 로컬 좌표)
+                float moveX = (d ? 1f : 0f) + (a ? -1f : 0f);
+                float moveZ = (w ? 1f : 0f) + (s ? -1f : 0f);
+
+                // 대각선 정규화 (W+D 동시에 √2 빨라지지 않도록)
+                float len = MathF.Sqrt(moveX * moveX + moveZ * moveZ);
+                if (len > 0f)
+                {
+                    moveX /= len;
+                    moveZ /= len;
+                }
+
+                // 시점 갱신 (pitch 서버측 클램프 검증)
+                Player.Yaw = pkt.Yaw;
+                Player.Pitch = Math.Clamp(pkt.Pitch, pitchMin, pitchMax);
+
+                // yaw 회전 적용 → 월드 좌표 이동량
+                float yawRad = Player.Yaw * DEG2RAD;
+                float cosY = MathF.Cos(yawRad);
+                float sinY = MathF.Sin(yawRad);
+                float worldX = moveX * cosY + moveZ * sinY;
+                float worldZ = -moveX * sinY + moveZ * cosY;
+
+                // 위치 갱신 (Y축 = 점프/중력은 수요일)
+                Player.PosX += worldX * speed * dt;
+                Player.PosZ += worldZ * speed * dt;
+
+                // 점프 비트(bit4)
+                bool jump = (pkt.InputBits & (1 << 4)) != 0;
+
+                // 점프 입력: 지면에 있을 때만 한 번 위로 가속
+                if (jump && Player.IsGrounded)
+                {
+                    Player.VelocityY = Balance.Current.Player.JumpVelocity;
+                    Player.IsGrounded = false;
+                }
+
+                // 중력 적분 → Y 위치 적분
+                Player.VelocityY += Balance.Current.Physics.Gravity * dt;
+                Player.PosY += Player.VelocityY * dt;
+
+                // 지면 클램프
+                float groundY = Balance.Current.Physics.GroundY;
+                if (Player.PosY <= groundY)
+                {
+                    Player.PosY = groundY;
+                    Player.VelocityY = 0f;
+                    Player.IsGrounded = true;
+                }
+            }
+            // 받자마자 처리: 입력 반영 직후 4명 전원에 스냅샷 송신 (lock 밖)
+            BroadcastSnapshot();
+        }
+
+        private void HandleFire(C_Fire pkt)
+        {
+            const float DEG2RAD = MathF.PI / 180f;
+            float radius = Balance.Current.Weapon.HitscanSphereRadius;
+            byte damage  = Balance.Current.Weapon.Damage;
+
+            // 1) attacker 위치/시점 스냅샷 (lock 짧게)
+            float ox, oy, oz, yaw, pitch;
+            bool attackerDead;
+            lock (Player.Lock)
+            {
+                attackerDead = Player.IsDead;
+                ox = Player.PosX; oy = Player.PosY; oz = Player.PosZ;
+                yaw = Player.Yaw; pitch = Player.Pitch;
+            }
+            if (attackerDead) return;
+
+            // 2) yaw/pitch → forward 단위벡터
+            float yawR = yaw * DEG2RAD;
+            float pitR = pitch * DEG2RAD;
+            float dx = MathF.Sin(yawR) * MathF.Cos(pitR);
+            float dy = MathF.Sin(pitR);
+            float dz = MathF.Cos(yawR) * MathF.Cos(pitR);
+
+            // 3) 적팀 중 ray-sphere로 가장 가까운 1명
+            var sessions = MatchManager.Instance.GetMatchSnapshot();
+            ClientSession? hitSession = null;
+            float bestT = float.MaxValue;
+            float rSq = radius * radius;
+
+            foreach (var enemy in sessions)
+            {
+                if (enemy == this) continue;
+                if (enemy.Team == this.Team) continue;
+
+                float ex, ey, ez;
+                bool eDead;
+                lock (enemy.Player.Lock)
+                {
+                    eDead = enemy.Player.IsDead;
+                    ex = enemy.Player.PosX; ey = enemy.Player.PosY; ez = enemy.Player.PosZ;
+                }
+                if (eDead) continue;
+
+                float lx = ex - ox, ly = ey - oy, lz = ez - oz;
+                float tca = lx * dx + ly * dy + lz * dz;
+                if (tca < 0) continue;                       // ray 뒤쪽
+
+                float dSq = (lx * lx + ly * ly + lz * lz) - tca * tca;
+                if (dSq > rSq) continue;                     // 빗나감
+
+                float t = tca - MathF.Sqrt(rSq - dSq);
+                if (t < 0) continue;                         // 시작점이 구 내부
+                if (t < bestT) { bestT = t; hitSession = enemy; }
+            }
+
+            if (hitSession == null)
+            {
+                Console.WriteLine($"[Fire] {Nickname} -> miss");
+                return;
+            }
+
+            // 4) HP 감소 + 사망 판정
+            byte hpAfter; byte isKill;
+            lock (hitSession.Player.Lock)
+            {
+                int newHp = hitSession.Player.Hp - damage;
+                if (newHp <= 0)
+                {
+                    hitSession.Player.Hp = 0;
+                    hitSession.Player.IsDead = true;
+                    isKill = 1;
+                }
+                else
+                {
+                    hitSession.Player.Hp = (byte)newHp;
+                    isKill = 0;
+                }
+                hpAfter = hitSession.Player.Hp;
+            }
+
+            // 5) S_HitResult 4명 전원 브로드캐스트
+            var hit = new S_HitResult
+            {
+                AttackerToken = this.SessionToken,
+                VictimToken   = hitSession.SessionToken,
+                Damage        = damage,
+                VictimHpAfter = hpAfter,
+                IsKill        = isKill,
+            };
+            byte[] bytes = hit.Serialize();
+            foreach (var s in sessions)
+                _ = s.SendAsync(bytes);
+
+            Console.WriteLine($"[Fire] {Nickname} -> {hitSession.Nickname} dmg={damage} hp={hpAfter} kill={isKill}");
+
+            // 피격 직후 HP/사망 상태 즉시 동기화
+            BroadcastSnapshot();
+        }
+
+        // 인게임 4명의 현재 상태를 한 패킷에 모아 전원에게 송신.
+        // HandleInput / HandleFire 끝에서 호출 (받자마자 처리 모델).
+        private static void BroadcastSnapshot()
+        {
+            var sessions = MatchManager.Instance.GetMatchSnapshot();
+            if (sessions.Count == 0) return;
+
+            var snaps = new List<PlayerSnapshot>(sessions.Count);
+            foreach (var s in sessions)
+            {
+                lock (s.Player.Lock)
+                {
+                    snaps.Add(new PlayerSnapshot
+                    {
+                        Token     = s.SessionToken,
+                        PosX      = s.Player.PosX,
+                        PosY      = s.Player.PosY,
+                        PosZ      = s.Player.PosZ,
+                        Yaw       = s.Player.Yaw,
+                        Pitch     = s.Player.Pitch,
+                        Hp        = s.Player.Hp,
+                        StateBits = (byte)(s.Player.IsDead ? 1 : 0),
+                    });
+                }
+            }
+
+            var pkt = new S_Snapshot { Players = snaps };
+            byte[] bytes = pkt.Serialize();
+            foreach (var s in sessions)
+                _ = s.SendAsync(bytes);
         }
 
         // 외부에서 이 세션으로 패킷 보낼 때 호출.

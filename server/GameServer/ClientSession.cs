@@ -271,6 +271,8 @@ namespace GameServer
                     Player.IsGrounded = true;
                 }
             }
+            // 받자마자 처리: 입력 반영 직후 4명 전원에 스냅샷 송신 (lock 밖)
+            BroadcastSnapshot();
         }
 
         private void HandleFire(C_Fire pkt)
@@ -364,6 +366,41 @@ namespace GameServer
                 _ = s.SendAsync(bytes);
 
             Console.WriteLine($"[Fire] {Nickname} -> {hitSession.Nickname} dmg={damage} hp={hpAfter} kill={isKill}");
+
+            // 피격 직후 HP/사망 상태 즉시 동기화
+            BroadcastSnapshot();
+        }
+
+        // 인게임 4명의 현재 상태를 한 패킷에 모아 전원에게 송신.
+        // HandleInput / HandleFire 끝에서 호출 (받자마자 처리 모델).
+        private static void BroadcastSnapshot()
+        {
+            var sessions = MatchManager.Instance.GetMatchSnapshot();
+            if (sessions.Count == 0) return;
+
+            var snaps = new List<PlayerSnapshot>(sessions.Count);
+            foreach (var s in sessions)
+            {
+                lock (s.Player.Lock)
+                {
+                    snaps.Add(new PlayerSnapshot
+                    {
+                        Token     = s.SessionToken,
+                        PosX      = s.Player.PosX,
+                        PosY      = s.Player.PosY,
+                        PosZ      = s.Player.PosZ,
+                        Yaw       = s.Player.Yaw,
+                        Pitch     = s.Player.Pitch,
+                        Hp        = s.Player.Hp,
+                        StateBits = (byte)(s.Player.IsDead ? 1 : 0),
+                    });
+                }
+            }
+
+            var pkt = new S_Snapshot { Players = snaps };
+            byte[] bytes = pkt.Serialize();
+            foreach (var s in sessions)
+                _ = s.SendAsync(bytes);
         }
 
         // 외부에서 이 세션으로 패킷 보낼 때 호출.

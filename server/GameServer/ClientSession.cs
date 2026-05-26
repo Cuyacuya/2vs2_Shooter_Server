@@ -121,6 +121,12 @@ namespace GameServer
                         HandleInput(pkt);
                         break;
                     }
+                case PacketId.C_Fire:
+                    {
+                        var pkt = C_Fire.Deserialize(br);
+                        HandleFire(pkt);
+                        break;
+                    }
                 default:
                     Console.WriteLine($"[Session {Endpoint}] unknown packetId={id}");
                     break;
@@ -265,6 +271,99 @@ namespace GameServer
                     Player.IsGrounded = true;
                 }
             }
+        }
+
+        private void HandleFire(C_Fire pkt)
+        {
+            const float DEG2RAD = MathF.PI / 180f;
+            float radius = Balance.Current.Weapon.HitscanSphereRadius;
+            byte damage  = Balance.Current.Weapon.Damage;
+
+            // 1) attacker 위치/시점 스냅샷 (lock 짧게)
+            float ox, oy, oz, yaw, pitch;
+            bool attackerDead;
+            lock (Player.Lock)
+            {
+                attackerDead = Player.IsDead;
+                ox = Player.PosX; oy = Player.PosY; oz = Player.PosZ;
+                yaw = Player.Yaw; pitch = Player.Pitch;
+            }
+            if (attackerDead) return;
+
+            // 2) yaw/pitch → forward 단위벡터
+            float yawR = yaw * DEG2RAD;
+            float pitR = pitch * DEG2RAD;
+            float dx = MathF.Sin(yawR) * MathF.Cos(pitR);
+            float dy = MathF.Sin(pitR);
+            float dz = MathF.Cos(yawR) * MathF.Cos(pitR);
+
+            // 3) 적팀 중 ray-sphere로 가장 가까운 1명
+            var sessions = MatchManager.Instance.GetMatchSnapshot();
+            ClientSession? hitSession = null;
+            float bestT = float.MaxValue;
+            float rSq = radius * radius;
+
+            foreach (var enemy in sessions)
+            {
+                if (enemy == this) continue;
+                if (enemy.Team == this.Team) continue;
+
+                float ex, ey, ez;
+                bool eDead;
+                lock (enemy.Player.Lock)
+                {
+                    eDead = enemy.Player.IsDead;
+                    ex = enemy.Player.PosX; ey = enemy.Player.PosY; ez = enemy.Player.PosZ;
+                }
+                if (eDead) continue;
+
+                float lx = ex - ox, ly = ey - oy, lz = ez - oz;
+                float tca = lx * dx + ly * dy + lz * dz;
+                if (tca < 0) continue;                       // ray 뒤쪽
+
+                float dSq = (lx * lx + ly * ly + lz * lz) - tca * tca;
+                if (dSq > rSq) continue;                     // 빗나감
+
+                float t = tca - MathF.Sqrt(rSq - dSq);
+                if (t < 0) continue;                         // 시작점이 구 내부
+                if (t < bestT) { bestT = t; hitSession = enemy; }
+            }
+
+            if (hitSession == null) return; // miss
+
+            // 4) HP 감소 + 사망 판정
+            byte hpAfter; byte isKill;
+            lock (hitSession.Player.Lock)
+            {
+                int newHp = hitSession.Player.Hp - damage;
+                if (newHp <= 0)
+                {
+                    hitSession.Player.Hp = 0;
+                    hitSession.Player.IsDead = true;
+                    isKill = 1;
+                }
+                else
+                {
+                    hitSession.Player.Hp = (byte)newHp;
+                    isKill = 0;
+                }
+                hpAfter = hitSession.Player.Hp;
+            }
+
+            // 5) S_HitResult 4명 전원 브로드캐스트
+            var hit = new S_HitResult
+            {
+                AttackerToken = this.SessionToken,
+                VictimToken   = hitSession.SessionToken,
+                Damage        = damage,
+                VictimHpAfter = hpAfter,
+                IsKill        = isKill,
+            };
+            byte[] bytes = hit.Serialize();
+            foreach (var s in sessions)
+                _ = s.SendAsync(bytes);
+
+            Console.WriteLine($"[Fire] {Nickname} -> {hitSession.Nickname} dmg={damage} hp={hpAfter} kill={isKill}");
         }
 
         // 외부에서 이 세션으로 패킷 보낼 때 호출.

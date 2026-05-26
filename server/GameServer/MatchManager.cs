@@ -110,6 +110,15 @@ namespace GameServer
             }
         }
 
+        // 인게임 4명 세션 스냅샷. lock 안에서 복사 → 호출자는 lock 없이 안전하게 순회.
+        public List<ClientSession> GetMatchSnapshot()
+        {
+            lock (_lock)
+            {
+                return new List<ClientSession>(_waiting);
+            }
+        }
+
         private void BroadcastGameStart(List<ClientSession> sessions)
         {
             var playerInfos = new List<S_GameStart.PlayerInfo>(sessions.Count);

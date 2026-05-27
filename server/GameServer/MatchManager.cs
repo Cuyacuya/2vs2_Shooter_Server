@@ -124,6 +124,24 @@ namespace GameServer
             }
         }
 
+        // sessionToken으로 ClientSession 찾기. UDP 패킷 발신자 매칭에 사용.
+        public bool TryGetSession(ushort sessionToken, out ClientSession? found)
+        {
+            lock (_lock)
+            {
+                foreach (var s in _waiting)
+                {
+                    if (s.SessionToken == sessionToken)
+                    {
+                        found = s;
+                        return true;
+                    }
+                }
+            }
+            found = null;
+            return false;
+        }
+
         // 인게임 4명 세션 스냅샷. lock 안에서 복사 → 호출자는 lock 없이 안전하게 순회.
         public List<ClientSession> GetMatchSnapshot()
         {

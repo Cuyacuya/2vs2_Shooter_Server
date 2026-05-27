@@ -29,9 +29,9 @@ ReadOnePacketAsync(NetworkStream networkStream, CancellationToken ct)
     }
 }
 
-// 로그인 후 응답 받고 연결을 유지한 채 TcpClient 반환
+// 로그인 후 응답 받고 연결을 유지한 채 (TcpClient, sessionToken) 반환
 // (연결을 끊으면 서버가 큐에서 빼버려서 매치 못 채움 → 유지 필요)
-static async Task<TcpClient?> LoginAsync(string nickname)
+static async Task<(TcpClient client, ushort token)?> LoginAsync(string nickname)
 {
     var client = new TcpClient();
     await client.ConnectAsync(Host, Port);
@@ -47,13 +47,15 @@ static async Task<TcpClient?> LoginAsync(string nickname)
         return null;
     }
     var (id, br, ms) = result.Value;
+    ushort token = 0;
     if ((PacketId)id == PacketId.S_LoginResult)
     {
         var r = S_LoginResult.Deserialize(br);
+        token = r.SessionToken;
         Console.WriteLine($"  [{nickname}] success={r.Success}, token={r.SessionToken},reason = '{r.Reason}'");
     }
     ms.Dispose();
-    return client;
+    return (client, token);
 }
 
 // 로그인 이후 들어오는 매칭/게임 시작 패킷을 계속 수신해 콘솔에 찍는다.
@@ -143,10 +145,12 @@ static async Task ListenLoopAsync(TcpClient client, string nickname,
 }
 
 // 게임 시작 후 20Hz로 랜덤 입력/사격 송신. 통합 테스트용.
-static async Task InputLoopAsync(TcpClient client, string nickname,
+// C_UdpHello + C_Input은 UDP, C_Fire는 TCP (헤더 sessionToken 0 → 매핑된 stream 으로 구분).
+static async Task InputLoopAsync(TcpClient client, string nickname, ushort token,
                                  TaskCompletionSource<byte> gameStarted,
                                  CancellationToken ct)
 {
+    System.Net.Sockets.UdpClient? udp = null;
     try
     {
         // S_GameStart 도착까지 대기. ct 취소되면 즉시 탈출.
@@ -165,20 +169,31 @@ static async Task InputLoopAsync(TcpClient client, string nickname,
         // 적팀 향한 yaw로 시작 (Red=90→+X, Blue=270→-X). 서버 스폰과 일치.
         float yaw = myTeam == 0 ? 90f : 270f;
 
+        // UDP 채널 준비 — ephemeral 포트로 바인딩하여 서버 7778에 송신
+        udp = new System.Net.Sockets.UdpClient(0);
+        var serverUdpEp = new System.Net.IPEndPoint(System.Net.IPAddress.Parse(Host), 7778);
+
+        // C_UdpHello 송신 (1~2회 재시도해도 OK, 일단 1회)
+        byte[] helloBytes = new C_UdpHello().Serialize(token);
+        await udp.SendAsync(helloBytes, helloBytes.Length, serverUdpEp);
+        await Task.Delay(50, ct);   // 서버가 endpoint 매핑할 시간
+
         while (!ct.IsCancellationRequested)
         {
             byte bits = 0;
-            if (rng.NextDouble() < 0.2) bits |= 1 << 0;           // W 20% (느린 전진 → 교전 윈도우 길게)
+            if (rng.NextDouble() < 0.2) bits |= 1 << 0;           // W 20%
             if (rng.NextDouble() < 0.02) bits |= 1 << 4;          // Jump 2%
 
-            yaw += (float)((rng.NextDouble() - 0.5) * 4.0);       // ±2°/tick 작은 흔들림 (조준 유지)
+            yaw += (float)((rng.NextDouble() - 0.5) * 4.0);
             if (yaw < 0)   yaw += 360;
             if (yaw > 360) yaw -= 360;
 
-            byte[] inputBytes = new C_Input { InputBits = bits, Yaw = yaw, Pitch = 0f }.Serialize();
-            await stream.WriteAsync(inputBytes, ct);
+            // C_Input → UDP
+            byte[] inputBytes = new C_Input { InputBits = bits, Yaw = yaw, Pitch = 0f }.Serialize(token);
+            await udp.SendAsync(inputBytes, inputBytes.Length, serverUdpEp);
 
-            if (rng.NextDouble() < 0.25)                          // Fire 25%
+            // C_Fire → TCP (사격은 신뢰성 필요)
+            if (rng.NextDouble() < 0.25)
             {
                 byte[] fireBytes = new C_Fire().Serialize();
                 await stream.WriteAsync(fireBytes, ct);
@@ -193,6 +208,10 @@ static async Task InputLoopAsync(TcpClient client, string nickname,
     {
         Console.WriteLine($"  [{nickname}] input error: {ex.Message}");
     }
+    finally
+    {
+        udp?.Dispose();
+    }
 }
 
 // 시나리오: 4명 차곡차곡 로그인 → 큐 채워 매치 시작
@@ -204,13 +223,14 @@ var inputers = new List<Task>();
 for (int i = 1; i <= 4; i++)
 {
     string nick = $"p{i}";
-    var c = await LoginAsync(nick);
-    if (c != null)
+    var login = await LoginAsync(nick);
+    if (login != null)
     {
+        var (c, token) = login.Value;
         clients.Add((c, nick));
         var tcs = new TaskCompletionSource<byte>(TaskCreationOptions.RunContinuationsAsynchronously);
         listeners.Add(ListenLoopAsync(c, nick, tcs, listenCts.Token));
-        inputers.Add (InputLoopAsync (c, nick, tcs, listenCts.Token));
+        inputers.Add (InputLoopAsync (c, nick, token, tcs, listenCts.Token));
     }
     await Task.Delay(100); // 로그 순서 보기 좋게
 }
@@ -218,8 +238,8 @@ for (int i = 1; i <= 4; i++)
 // 5번째 — 매치 진행 중이라 거부 예상
 await Task.Delay(500);
 Console.WriteLine("\n=== Step 2: 5번째 (MATCH_IN_PROGRESS 거부 예상) ===");
-var c5 = await LoginAsync("p5");
-c5?.Dispose();
+var login5 = await LoginAsync("p5");
+login5?.client.Dispose();
 
 // 매칭/게임 시작 후 10초간 인게임 시뮬 (입력/사격 송신 + S_Snapshot/S_HitResult 수신)
 Console.WriteLine("\n=== Step 3: 인게임 시뮬 5초 ===");

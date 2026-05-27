@@ -28,6 +28,13 @@ namespace GameServer
         public byte Team { get; set; } = 0;  // 0=Red, 1=Blue. StartMatch에서 세팅
         public PlayerState Player { get; } = new();
 
+        // 클라가 C_UdpHello 보낸 시점에 기록되는 UDP 발신 endpoint.
+        // null이면 UDP 핸드셰이크 아직 안 됨 → UdpServer.SendTo 가 송신 무시.
+        public System.Net.IPEndPoint? UdpEndPoint { get; set; }
+
+        // UdpServer.HandleInputDatagram에서 호출. 핸들러 자체는 TCP 경로와 동일.
+        public void HandleInputFromUdp(C_Input pkt) => HandleInput(pkt);
+
         public ClientSession(TcpClient client)
         {
             _client = client;

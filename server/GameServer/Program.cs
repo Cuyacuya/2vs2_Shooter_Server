@@ -34,6 +34,9 @@ Console.WriteLine($"[Server] Listening on {TcpPort}");
 // UDP 채널 (3주차): C_UdpHello 핸드셰이크 후 C_Input/S_Snapshot이 UDP로 흐름
 UdpServer.Instance.Start(UdpPort);
 
+// 정식 30Hz 틱 루프 (3주차 수요일): 큐잉된 입력을 일괄 처리 + 매 틱 스냅샷 송신
+TickServer.Instance.Start();
+
 while (true)
 {
     TcpClient client = await listener.AcceptTcpClientAsync();

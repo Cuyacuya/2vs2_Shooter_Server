@@ -32,8 +32,9 @@ namespace GameServer
         // null이면 UDP 핸드셰이크 아직 안 됨 → UdpServer.SendTo 가 송신 무시.
         public System.Net.IPEndPoint? UdpEndPoint { get; set; }
 
-        // UdpServer.HandleInputDatagram에서 호출. 핸들러 자체는 TCP 경로와 동일.
-        public void HandleInputFromUdp(C_Input pkt) => HandleInput(pkt);
+        // UdpServer가 C_Input 받으면 호출. 3주차부터는 즉시 처리 X, 큐에 쌓기만.
+        // TickServer가 30Hz로 큐를 비우며 일괄 시뮬레이션.
+        public void HandleInputFromUdp(C_Input pkt) => Player.InputQueue.Enqueue(pkt);
 
         public ClientSession(TcpClient client)
         {
@@ -124,8 +125,9 @@ namespace GameServer
                     }
                 case PacketId.C_Input:
                     {
+                        // 정상 경로는 UDP. TCP로 와도 큐잉 (방어적, 거의 안 옴)
                         var pkt = C_Input.Deserialize(br);
-                        HandleInput(pkt);
+                        Player.InputQueue.Enqueue(pkt);
                         break;
                     }
                 case PacketId.C_Fire:
@@ -195,11 +197,15 @@ namespace GameServer
                 MatchManager.Instance.BroadcastGameStartNow(gameStartSnap);
         }
 
-        private void HandleInput(C_Input pkt)
+        // TickServer가 30Hz로 호출. 큐의 마지막 입력만 적용 + 물리 시뮬은 매 틱 무조건.
+        // dt는 고정 (1/30초) — 점프 궤적 재현성 보장.
+        public void SimulateOneTick(float dt)
         {
-            // 밸런스값(이동속도, pitch 범위) = balance.json에서 로드. 디자이너 튜닝 대상.
-            // 수학 상수(DEG2RAD) = 코드 const. 절대 안 바뀜.
-            float speed = Balance.Current.Player.MoveSpeed;
+            // 1) 큐 비우기 — 마지막 1개만 유지 (한 틱 안 키 상태 변동은 최종 의도만 반영)
+            C_Input? lastInput = null;
+            while (Player.InputQueue.TryDequeue(out var pkt)) lastInput = pkt;
+
+            float speed    = Balance.Current.Player.MoveSpeed;
             float pitchMin = Balance.Current.Player.PitchMinDeg;
             float pitchMax = Balance.Current.Player.PitchMaxDeg;
             const float DEG2RAD = MathF.PI / 180f;
@@ -208,68 +214,50 @@ namespace GameServer
             {
                 if (Player.IsDead) return;
 
-                //dt 계산
-                long nowTicks = Stopwatch.GetTimestamp();
-                float dt;
-                if (Player.LastInputTicks == 0)
+                bool jump = false;
+
+                // 2) 입력 적용 (있을 때만)
+                if (lastInput != null)
                 {
-                    dt = 0f;
+                    bool w = (lastInput.InputBits & (1 << 0)) != 0;
+                    bool s = (lastInput.InputBits & (1 << 1)) != 0;
+                    bool a = (lastInput.InputBits & (1 << 2)) != 0;
+                    bool d = (lastInput.InputBits & (1 << 3)) != 0;
+                    jump   = (lastInput.InputBits & (1 << 4)) != 0;
+
+                    // 시점
+                    Player.Yaw   = lastInput.Yaw;
+                    Player.Pitch = Math.Clamp(lastInput.Pitch, pitchMin, pitchMax);
+
+                    // 이동 벡터 + 대각선 정규화
+                    float moveX = (d ? 1f : 0f) + (a ? -1f : 0f);
+                    float moveZ = (w ? 1f : 0f) + (s ? -1f : 0f);
+                    float len = MathF.Sqrt(moveX * moveX + moveZ * moveZ);
+                    if (len > 0f) { moveX /= len; moveZ /= len; }
+
+                    // yaw 회전 → 월드 좌표
+                    float yawRad = Player.Yaw * DEG2RAD;
+                    float cosY = MathF.Cos(yawRad);
+                    float sinY = MathF.Sin(yawRad);
+                    float worldX =  moveX * cosY + moveZ * sinY;
+                    float worldZ = -moveX * sinY + moveZ * cosY;
+
+                    Player.PosX += worldX * speed * dt;
+                    Player.PosZ += worldZ * speed * dt;
                 }
-                else
-                {
-                    dt = (float)((nowTicks - Player.LastInputTicks) / (double)Stopwatch.Frequency);
-                    if (dt > 0.1f) dt = 0.1f; // 비정상적 큰 dt 방어 (네트워크끊김 등)
-                }
-                Player.LastInputTicks = nowTicks;
 
-                // 비트마스크 풀기 (WASD만, 점프는 수요일 작업)
-                bool w = (pkt.InputBits & (1 << 0)) != 0;
-                bool s = (pkt.InputBits & (1 << 1)) != 0;
-                bool a = (pkt.InputBits & (1 << 2)) != 0;
-                bool d = (pkt.InputBits & (1 << 3)) != 0;
-
-                // raw 이동 벡터 (캐릭터 로컬 좌표)
-                float moveX = (d ? 1f : 0f) + (a ? -1f : 0f);
-                float moveZ = (w ? 1f : 0f) + (s ? -1f : 0f);
-
-                // 대각선 정규화 (W+D 동시에 √2 빨라지지 않도록)
-                float len = MathF.Sqrt(moveX * moveX + moveZ * moveZ);
-                if (len > 0f)
-                {
-                    moveX /= len;
-                    moveZ /= len;
-                }
-
-                // 시점 갱신 (pitch 서버측 클램프 검증)
-                Player.Yaw = pkt.Yaw;
-                Player.Pitch = Math.Clamp(pkt.Pitch, pitchMin, pitchMax);
-
-                // yaw 회전 적용 → 월드 좌표 이동량
-                float yawRad = Player.Yaw * DEG2RAD;
-                float cosY = MathF.Cos(yawRad);
-                float sinY = MathF.Sin(yawRad);
-                float worldX = moveX * cosY + moveZ * sinY;
-                float worldZ = -moveX * sinY + moveZ * cosY;
-
-                // 위치 갱신 (Y축 = 점프/중력은 수요일)
-                Player.PosX += worldX * speed * dt;
-                Player.PosZ += worldZ * speed * dt;
-
-                // 점프 비트(bit4)
-                bool jump = (pkt.InputBits & (1 << 4)) != 0;
-
-                // 점프 입력: 지면에 있을 때만 한 번 위로 가속
+                // 3) 점프 트리거 (지면 위 + 점프 비트)
                 if (jump && Player.IsGrounded)
                 {
                     Player.VelocityY = Balance.Current.Player.JumpVelocity;
                     Player.IsGrounded = false;
                 }
 
-                // 중력 적분 → Y 위치 적분
+                // 4) 물리 시뮬 (입력 유무 관계없이 매 틱)
                 Player.VelocityY += Balance.Current.Physics.Gravity * dt;
-                Player.PosY += Player.VelocityY * dt;
+                Player.PosY      += Player.VelocityY * dt;
 
-                // 지면 클램프
+                // 5) 지면 클램프
                 float groundY = Balance.Current.Physics.GroundY;
                 if (Player.PosY <= groundY)
                 {
@@ -278,8 +266,7 @@ namespace GameServer
                     Player.IsGrounded = true;
                 }
             }
-            // 받자마자 처리: 입력 반영 직후 4명 전원에 스냅샷 송신 (lock 밖)
-            BroadcastSnapshot();
+            // BroadcastSnapshot은 TickServer가 틱 끝에 1회만 호출 (수요일은 30Hz)
         }
 
         private void HandleFire(C_Fire pkt)
@@ -383,8 +370,8 @@ namespace GameServer
         }
 
         // 인게임 4명의 현재 상태를 한 패킷에 모아 전원에게 송신.
-        // HandleInput / HandleFire 끝에서 호출 (받자마자 처리 모델).
-        private static void BroadcastSnapshot()
+        // 3주차부터는 TickServer가 틱 끝에 1회 호출. HandleFire(피격 시)에서도 즉시 호출.
+        public static void BroadcastSnapshot()
         {
             var sessions = MatchManager.Instance.GetMatchSnapshot();
             if (sessions.Count == 0) return;

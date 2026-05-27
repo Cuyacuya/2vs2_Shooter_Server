@@ -15,6 +15,11 @@ namespace GameServer
         private readonly object _lock = new();
         private bool _matchInProgress = false;
 
+        // 3주차 목요일: 라운드 종료 판정 + 점수
+        private byte _redScore = 0;
+        private byte _blueScore = 0;
+        private bool _roundEnded = false;   // 같은 라운드 두 번 종료 처리 방지
+
         //외부에서 new 못 하게 막음 (싱글톤 강제)
         private MatchManager() { }
 
@@ -140,6 +145,59 @@ namespace GameServer
             }
             found = null;
             return false;
+        }
+
+        // TickServer가 매 틱 끝에 호출. 한 팀 전원 사망 시 S_RoundEnd 브로드캐스트.
+        // 다음 라운드 시작/매치 종료는 금요일 작업.
+        public void OnTickEnd()
+        {
+            List<ClientSession>? targets = null;
+            byte winnerTeam = 0;
+            byte redScoreSnap = 0, blueScoreSnap = 0;
+
+            lock (_lock)
+            {
+                if (!_matchInProgress) return;
+                if (_roundEnded) return;
+
+                // 팀별 생존자 카운트
+                int redAlive = 0, blueAlive = 0;
+                foreach (var s in _waiting)
+                {
+                    bool dead;
+                    lock (s.Player.Lock) dead = s.Player.IsDead;
+                    if (!dead)
+                    {
+                        if (s.Team == 0) redAlive++;
+                        else blueAlive++;
+                    }
+                }
+
+                if (redAlive > 0 && blueAlive > 0) return;   // 양팀 다 살아있음
+
+                // 라운드 종료 — 점수 갱신
+                winnerTeam = (byte)(redAlive == 0 ? 1 : 0);
+                if (winnerTeam == 0) _redScore++;
+                else _blueScore++;
+                _roundEnded = true;
+                redScoreSnap = _redScore;
+                blueScoreSnap = _blueScore;
+                targets = new List<ClientSession>(_waiting);
+            }
+
+            // S_RoundEnd TCP 브로드캐스트 (lock 밖)
+            var pkt = new S_RoundEnd
+            {
+                WinnerTeam = winnerTeam,
+                RedScore = redScoreSnap,
+                BlueScore = blueScoreSnap,
+            };
+            byte[] bytes = pkt.Serialize();
+            foreach (var s in targets!)
+                _ = s.SendAsync(bytes);
+
+            string winnerName = winnerTeam == 0 ? "Red" : "Blue";
+            Console.WriteLine($"[Round] ended — winner={winnerName} score={redScoreSnap}:{blueScoreSnap}");
         }
 
         // 인게임 4명 세션 스냅샷. lock 안에서 복사 → 호출자는 lock 없이 안전하게 순회.

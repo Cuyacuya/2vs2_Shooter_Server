@@ -271,6 +271,9 @@ namespace GameServer
 
         private void HandleFire(C_Fire pkt)
         {
+            // 라운드 진행 중이 아니면 거부 (PostRound 대기 / 매치 종료 후)
+            if (!MatchManager.Instance.IsRoundLive) return;
+
             const float DEG2RAD = MathF.PI / 180f;
             float radius = Balance.Current.Weapon.HitscanSphereRadius;
             byte damage  = Balance.Current.Weapon.Damage;

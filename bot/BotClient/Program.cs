@@ -242,8 +242,9 @@ var login5 = await LoginAsync("p5");
 login5?.client.Dispose();
 
 // 매칭/게임 시작 후 10초간 인게임 시뮬 (입력/사격 송신 + S_Snapshot/S_HitResult 수신)
-Console.WriteLine("\n=== Step 3: 인게임 시뮬 5초 ===");
-await Task.Delay(5000);
+// 풀 사이클 검증용: best-of-3 + 라운드 사이 3초 대기 → 최대 ~30초
+Console.WriteLine("\n=== Step 3: 인게임 시뮬 30초 (풀 사이클) ===");
+await Task.Delay(30000);
 
 Console.WriteLine("\n[Bot] 정리 (모든 연결 종료)");
 listenCts.Cancel();

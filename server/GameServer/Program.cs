@@ -4,7 +4,8 @@ using System.Net.Sockets;
 using GameServer;
 using Shared;
 
-const int Port = 7777;
+const int TcpPort = 7777;
+const int UdpPort = 7778;
 
 // 게임 밸런스 설정 로드 (서버·클라 공유).
 // 실행 위치(bin/Debug/net8.0/)에서 위로 올라가며 Game.sln이 있는 폴더(=레포 루트) 탐색.
@@ -26,9 +27,15 @@ BalanceLoader.LoadFromFile(configPath);
 Console.WriteLine($"[Balance] loaded: MoveSpeed={Balance.Current.Player.MoveSpeed}, " +
                   $"Damage={Balance.Current.Weapon.Damage}, Gravity={Balance.Current.Physics.Gravity}");
 
-var listener = new TcpListener(IPAddress.Any, Port);
+var listener = new TcpListener(IPAddress.Any, TcpPort);
 listener.Start();
-Console.WriteLine($"[Server] Listening on {Port}");
+Console.WriteLine($"[Server] Listening on {TcpPort}");
+
+// UDP 채널 (3주차): C_UdpHello 핸드셰이크 후 C_Input/S_Snapshot이 UDP로 흐름
+UdpServer.Instance.Start(UdpPort);
+
+// 정식 30Hz 틱 루프 (3주차 수요일): 큐잉된 입력을 일괄 처리 + 매 틱 스냅샷 송신
+TickServer.Instance.Start();
 
 while (true)
 {

@@ -10,5 +10,9 @@ namespace Shared
         S_Snapshot = 6,
         C_Fire = 7,
         S_HitResult = 8,
+        C_UdpHello = 9,
+        S_RoundStart = 10,
+        S_RoundEnd = 11,
+        S_MatchEnd = 12,
     }
 }
